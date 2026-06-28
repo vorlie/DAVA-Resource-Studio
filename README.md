@@ -152,12 +152,19 @@ The Studio currently does not decode, preview, or encode DDS textures.
 | `.pvr` | PowerVR texture container/variant | Opaque payload; DVPL only |
 | `.webp`, `.png` | Image payloads | Opaque in the Studio; may be opened externally after unpacking |
 | `.anim`, `.animation`, `.actions` | Animation/action data | Opaque engine data |
-| `.bnk`, `.pck` | Packaged audio/bank data | Opaque payload |
+| `.bnk` | Audiokinetic Wwise sound bank | Opaque payload; DVPL only |
+| `.pck` | Audiokinetic Wwise packaged audio/media data | Opaque payload; DVPL only |
 | `.heightmap` | Terrain/height data | Opaque payload |
 | `.lka`, `.mkm`, `.model` | Engine-specific asset data | Opaque payload; format not claimed |
 | `.bin` | Generic binary data, including shader cache entries | Metadata/hex-header inspection only where implemented |
 
 An extension is only a hint. The project does not assume that every file with the same suffix shares an identical version or schema.
+
+### Wwise audio
+
+Blitz uses Audiokinetic Wwise for audio. `.bnk` resources are Wwise sound banks containing sound structures, events, and references, while `.pck` resources are Wwise packages commonly used to bundle streamed or encoded media. They may reference additional encoded audio rather than containing directly playable PCM data.
+
+DAVA Resource Studio currently supports only the surrounding DVPL layer. It does not parse Wwise hierarchy metadata, resolve event-to-media relationships, preview encoded audio, or rebuild sound banks/packages. After DVPL unpacking, use tooling that explicitly supports the matching Wwise bank/package version. Replacing individual media bytes without rebuilding offsets, tables, hashes, and references can corrupt the package or make events silent.
 
 ## Safe binary-resource workflow
 
