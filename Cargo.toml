@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "crates/dvpl",
+    "crates/resourcefs",
+    "crates/game",
+    "app/dvpl-pipeline",
+    "app/studio/src-tauri",
+]
+resolver = "2"

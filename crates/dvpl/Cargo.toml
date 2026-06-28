@@ -1,0 +1,12 @@
+[package]
+name = "dvpl"
+version = "0.1.0"
+edition = "2021"
+description = "DVPL pack/unpack codec and resource parsers for WoT Blitz."
+
+[dependencies]
+anyhow   = "1"
+crc32fast = "1"
+lz4      = "1"
+serde     = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

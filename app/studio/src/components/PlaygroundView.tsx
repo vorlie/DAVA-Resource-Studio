@@ -1,0 +1,10 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export default function PlaygroundView({ running, hasChanges, onApply, onRefreshProcess, onStatus }: { running: boolean; hasChanges: boolean; onApply: () => Promise<boolean>; onRefreshProcess: () => Promise<void>; onStatus: (value: string) => void }) {
+  const launch = async () => { try { await invoke("game_launch"); onStatus("Game launched."); setTimeout(() => void onRefreshProcess(), 800); } catch (error) { onStatus(`Launch failed: ${error}`); } };
+  const rebuild = async () => { if (!confirm("Back up and clear the shader cache, then launch the game?")) return; try { if (hasChanges && !await onApply()) return; await invoke("shader_cache_clear"); await launch(); } catch (error) { onStatus(`Rebuild workflow failed: ${error}`); } };
+  return <div className="tool-view playground"><header><div><h2>Shader Playground</h2><p>Apply source changes, invalidate compiled shaders, and launch the game.</p></div><span className={`process-pill ${running ? "running" : ""}`}>{running ? "Game running" : "Game stopped"}</span></header>
+    <div className="workflow-grid"><section><span>1</span><h3>Apply resources</h3><p>Pack all staged shader and material edits back into Data.</p><button className="primary" disabled={running || !hasChanges} onClick={() => void onApply()}>Apply staged resources</button></section><section><span>2</span><h3>Rebuild shader cache</h3><p>Move the current cache to a backup, then launch the game to rebuild it.</p><button className="primary" disabled={running} onClick={() => void rebuild()}>Rebuild & launch</button></section><section><span>3</span><h3>Launch only</h3><p>Start the detected game executable without changing resources or cache.</p><button className="ghost" disabled={running} onClick={() => void launch()}>Launch game</button></section></div>
+    <div className="info-banner"><strong>Compile unavailable</strong><span>The proprietary shader compiler contract is unknown. The studio will not simulate compilation success.</span></div>
+  </div>;
+}
