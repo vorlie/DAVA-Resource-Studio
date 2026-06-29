@@ -41,6 +41,7 @@ pub fn run() {
             commands::resource::material_inspect,
             commands::resource::shader_index,
             commands::resource::shader_references,
+            commands::resource::shader_symbol_map,
             // runtime, graphics and shader cache
             commands::runtime::runtime_get_path,
             commands::runtime::runtime_set_path,

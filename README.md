@@ -17,6 +17,7 @@ DAVA Resource Studio is a Windows desktop application and Rust toolkit for inspe
 - Inspect material layers, shaders, defines, passes, presets, and render state.
 - Index shader includes, macros, conditions, uniforms, properties, and entry points.
 - Navigate shader includes and search symbol references.
+- Map uniforms, properties, macros, conditions, and entry points across recursive include graphs with live editor highlights and gutter navigation.
 - Edit recognized runtime graphics settings with recoverable backups.
 - Inspect, compare, export, back up, clear, and restore opaque shader-cache entries.
 - Apply resources, invalidate the shader cache, and launch the detected game.

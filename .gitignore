@@ -23,6 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 
-backup_files/
+other/
 target/
 .ag*

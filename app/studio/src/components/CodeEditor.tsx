@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
-import { EditorState } from "@codemirror/state";
-import { Decoration, EditorView, keymap, lineNumbers, MatchDecorator, ViewPlugin } from "@codemirror/view";
+import { EditorState, StateEffect, StateField } from "@codemirror/state";
+import { Decoration, EditorView, GutterMarker, gutter, keymap, lineNumbers, MatchDecorator, ViewPlugin, type DecorationSet } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { searchKeymap } from "@codemirror/search";
 import { yaml } from "@codemirror/lang-yaml";
@@ -10,6 +10,7 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { autocompletion, type Completion } from "@codemirror/autocomplete";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
+import type { RevealTarget, SymbolOccurrence } from "../workspace";
 
 type CodeEditorProps = {
   path: string;
@@ -19,6 +20,14 @@ type CodeEditorProps = {
   diagnostics?: Array<{ severity: string; message: string; line: number; column: number }>;
   completions?: string[];
   onOpenInclude?: (target: string) => void;
+  navigationSymbol?: string | null;
+  navigationOccurrences?: SymbolOccurrence[];
+  navigationCurrentIndex?: number;
+  onCursorSymbol?: (symbol: string | null) => void;
+  onNavigateOccurrence?: (occurrence: SymbolOccurrence) => void;
+  onGoToDefinition?: () => void;
+  revealTarget?: RevealTarget | null;
+  onRevealHandled?: () => void;
 };
 
 export type LanguageKind = "yaml" | "json" | "shader" | "plain";
@@ -53,6 +62,77 @@ const shaderTokens = ViewPlugin.define((view) => ({
   update(update) { this.decorations = shaderTokenMatcher.updateDeco(update, this.decorations); },
 }), { decorations: (value) => value.decorations });
 
+type NavigationPayload = { symbol: string | null; occurrences: SymbolOccurrence[]; currentIndex: number };
+type NavigationFieldValue = NavigationPayload & { decorations: DecorationSet };
+const setSymbolNavigation = StateEffect.define<NavigationPayload>();
+
+function isDeclaration(kind: SymbolOccurrence["kind"]) {
+  return kind.endsWith("_declaration") || kind === "macro_definition";
+}
+
+function makeNavigationValue(state: EditorState, payload: NavigationPayload): NavigationFieldValue {
+  const ranges = payload.occurrences.flatMap((occurrence, index) => {
+    if (occurrence.line < 1 || occurrence.line > state.doc.lines) return [];
+    const line = state.doc.line(occurrence.line);
+    const from = Math.min(line.to, line.from + Math.max(0, occurrence.column - 1));
+    const to = Math.min(line.to, from + occurrence.length);
+    if (from === to) return [];
+    return [Decoration.mark({ class: `${isDeclaration(occurrence.kind) ? "cm-symbol-declaration" : "cm-symbol-usage"}${index === payload.currentIndex ? " current" : ""}` }).range(from, to)];
+  });
+  return { ...payload, decorations: Decoration.set(ranges, true) };
+}
+
+const symbolNavigationField = StateField.define<NavigationFieldValue>({
+  create: (state) => makeNavigationValue(state, { symbol: null, occurrences: [], currentIndex: -1 }),
+  update(value, transaction) {
+    for (const effect of transaction.effects) if (effect.is(setSymbolNavigation)) return makeNavigationValue(transaction.state, effect.value);
+    return transaction.docChanged ? { ...value, decorations: value.decorations.map(transaction.changes) } : value;
+  },
+  provide: (field) => EditorView.decorations.from(field, (value) => value.decorations),
+});
+
+class SymbolGutterMarker extends GutterMarker {
+  readonly elementClass: string;
+  constructor(readonly declaration: boolean, readonly current: boolean) { super(); this.elementClass = `${declaration ? "cm-symbol-gutter-declaration" : "cm-symbol-gutter-usage"}${current ? " current" : ""}`; }
+  toDOM() { const node = document.createElement("span"); node.textContent = this.declaration ? "◆" : "•"; node.title = this.declaration ? "Symbol declaration" : "Symbol usage"; return node; }
+}
+
+function classifyLocalLine(line: string, symbol: string): SymbolOccurrence["kind"] {
+  const trimmed = line.trim();
+  if (new RegExp(`^#(?:define|ensuredefined)\\s+${symbol}\\b`).test(trimmed)) return "macro_definition";
+  if (/^#(?:if|ifdef|ifndef|elif)\b/.test(trimmed)) return "condition";
+  if (trimmed.includes("uniform ") && new RegExp(`\\b${symbol}\\s*(?:;|:)`).test(trimmed)) return "uniform_declaration";
+  if (trimmed.includes(" property ") && new RegExp(`\\b${symbol}\\s*(?:;|:)`).test(trimmed)) return "property_declaration";
+  if (/^(?:fp_main|vp_main)$/.test(symbol) && new RegExp(`\\b${symbol}\\s*\\(`).test(trimmed)) return "entry_point_declaration";
+  return "usage";
+}
+
+export function scanLocalSymbolOccurrences(path: string, text: string, symbol: string): SymbolOccurrence[] {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(symbol)) return [];
+  const result: SymbolOccurrence[] = [];
+  let blockComment = false;
+  text.split(/\r?\n/).forEach((line, lineIndex) => {
+    const bytes = [...line];
+    let quote: string | null = null;
+    let index = 0;
+    while (index < bytes.length) {
+      if (blockComment) { if (bytes[index] === "*" && bytes[index + 1] === "/") { blockComment = false; index += 2; } else index += 1; continue; }
+      if (quote) { if (bytes[index] === "\\") index += 2; else { if (bytes[index] === quote) quote = null; index += 1; } continue; }
+      if (bytes[index] === "/" && bytes[index + 1] === "/") break;
+      if (bytes[index] === "/" && bytes[index + 1] === "*") { blockComment = true; index += 2; continue; }
+      if (bytes[index] === '"' || bytes[index] === "'") { quote = bytes[index]; index += 1; continue; }
+      if (/[A-Za-z_]/.test(bytes[index])) {
+        const start = index; index += 1;
+        while (index < bytes.length && /[A-Za-z0-9_]/.test(bytes[index])) index += 1;
+        if (bytes.slice(start, index).join("") === symbol) result.push({ path, line: lineIndex + 1, column: start + 1, length: symbol.length, kind: classifyLocalLine(line, symbol), preview: line.trim() });
+        continue;
+      }
+      index += 1;
+    }
+  });
+  return result;
+}
+
 function languageExtensions(path: string) {
   switch (languageKindForPath(path)) {
     case "yaml": return [yaml()];
@@ -62,18 +142,25 @@ function languageExtensions(path: string) {
   }
 }
 
-export default function CodeEditor({ path, value, onChange, onStage, diagnostics = [], completions = [], onOpenInclude }: CodeEditorProps) {
+export default function CodeEditor({ path, value, onChange, onStage, diagnostics = [], completions = [], onOpenInclude, navigationSymbol = null, navigationOccurrences = [], navigationCurrentIndex = -1, onCursorSymbol, onNavigateOccurrence, onGoToDefinition, revealTarget, onRevealHandled }: CodeEditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const changeRef = useRef(onChange);
   const stageRef = useRef(onStage);
   const includeRef = useRef(onOpenInclude);
   const completionsRef = useRef(completions);
+  const cursorRef = useRef(onCursorSymbol);
+  const navigateRef = useRef(onNavigateOccurrence);
+  const definitionRef = useRef(onGoToDefinition);
+  const cursorTimer = useRef<number | null>(null);
 
   changeRef.current = onChange;
   stageRef.current = onStage;
   includeRef.current = onOpenInclude;
   completionsRef.current = completions;
+  cursorRef.current = onCursorSymbol;
+  navigateRef.current = onNavigateOccurrence;
+  definitionRef.current = onGoToDefinition;
 
   useEffect(() => {
     if (!host.current) return;
@@ -86,6 +173,7 @@ export default function CodeEditor({ path, value, onChange, onStage, diagnostics
           history(),
           keymap.of([
             { key: "Mod-s", preventDefault: true, run: () => { stageRef.current(); return true; } },
+            { key: "F12", preventDefault: true, run: () => { definitionRef.current?.(); return true; } },
             ...defaultKeymap,
             ...historyKeymap,
             ...searchKeymap,
@@ -100,6 +188,18 @@ export default function CodeEditor({ path, value, onChange, onStage, diagnostics
           syntaxHighlighting(studioHighlightStyle, { fallback: true }),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) changeRef.current(update.state.doc.toString());
+            if ((update.selectionSet || update.docChanged) && languageKindForPath(path) === "shader") {
+              if (cursorTimer.current !== null) window.clearTimeout(cursorTimer.current);
+              cursorTimer.current = window.setTimeout(() => {
+                const position = update.state.selection.main.head;
+                const line = update.state.doc.lineAt(position);
+                const offset = position - line.from;
+                const left = line.text.slice(0, offset).match(/[A-Za-z_][A-Za-z0-9_]*$/)?.[0] ?? "";
+                const right = line.text.slice(offset).match(/^[A-Za-z0-9_]*/)?.[0] ?? "";
+                const symbol = `${left}${right}`;
+                cursorRef.current?.(/^[A-Za-z_][A-Za-z0-9_]*$/.test(symbol) ? symbol : null);
+              }, 150);
+            }
           }),
           EditorView.domEventHandlers({
             mousedown(event, view) {
@@ -123,13 +223,28 @@ export default function CodeEditor({ path, value, onChange, onStage, diagnostics
             "&.cm-focused": { outline: "none" },
             ".cm-shader-keyword": { color: "#c792ea", fontWeight: "600" },
             ".cm-shader-type": { color: "#82aaff" },
+            ".cm-symbol-declaration": { backgroundColor: "rgba(84,167,255,.22)", borderBottom: "1px solid #54a7ff" },
+            ".cm-symbol-usage": { backgroundColor: "rgba(244,193,93,.14)", borderBottom: "1px solid rgba(244,193,93,.75)" },
+            ".cm-symbol-declaration.current, .cm-symbol-usage.current": { backgroundColor: "rgba(255,107,122,.28)", outline: "1px solid rgba(255,107,122,.8)" },
+          }),
+          symbolNavigationField,
+          gutter({
+            class: "cm-symbol-gutter",
+            lineMarker(view, line) {
+              const navigation = view.state.field(symbolNavigationField);
+              const lineNumber = view.state.doc.lineAt(line.from).number;
+              const index = navigation.occurrences.findIndex((item) => item.line === lineNumber);
+              if (index < 0) return null;
+              return new SymbolGutterMarker(isDeclaration(navigation.occurrences[index].kind), index === navigation.currentIndex);
+            },
+            domEventHandlers: { mousedown(view, line) { const lineNumber = view.state.doc.lineAt(line.from).number; const occurrence = view.state.field(symbolNavigationField).occurrences.find((item) => item.line === lineNumber); if (occurrence) navigateRef.current?.(occurrence); return Boolean(occurrence); } },
           }),
           ...languageExtensions(path),
         ],
       }),
     });
     viewRef.current = view;
-    return () => { viewRef.current = null; view.destroy(); };
+    return () => { if (cursorTimer.current !== null) window.clearTimeout(cursorTimer.current); viewRef.current = null; view.destroy(); };
   }, [path]);
 
   useEffect(() => {
@@ -149,6 +264,25 @@ export default function CodeEditor({ path, value, onChange, onStage, diagnostics
     });
     view.dispatch(setDiagnostics(view.state, mapped));
   }, [diagnostics]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const local = navigationSymbol ? scanLocalSymbolOccurrences(path, value, navigationSymbol) : [];
+    const current = navigationOccurrences[navigationCurrentIndex];
+    const currentLocalIndex = current?.path === path ? local.findIndex((item) => item.line === current.line && item.column === current.column) : -1;
+    view.dispatch({ effects: setSymbolNavigation.of({ symbol: navigationSymbol, occurrences: local, currentIndex: currentLocalIndex }) });
+  }, [navigationCurrentIndex, navigationOccurrences, navigationSymbol, path, value]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !revealTarget || revealTarget.path !== path || revealTarget.line < 1 || revealTarget.line > view.state.doc.lines) return;
+    const line = view.state.doc.line(revealTarget.line);
+    const anchor = Math.min(line.to, line.from + Math.max(0, revealTarget.column - 1));
+    view.dispatch({ selection: { anchor, head: Math.min(line.to, anchor + revealTarget.length) }, effects: EditorView.scrollIntoView(anchor, { y: "center" }) });
+    view.focus();
+    onRevealHandled?.();
+  }, [onRevealHandled, path, revealTarget]);
 
   return <div className="code-editor" ref={host} />;
 }

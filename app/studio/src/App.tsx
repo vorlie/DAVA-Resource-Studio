@@ -11,7 +11,8 @@ import GraphicsView from "./components/GraphicsView";
 import ShaderCacheView from "./components/ShaderCacheView";
 import PlaygroundView from "./components/PlaygroundView";
 import type { MaterialSummary, ShaderFileInfo } from "./components/Editor";
-import { DEFAULT_LAYOUT, hasUnsavedWork, initialWorkspace, workspaceReducer, type OpenTab, type PanelLayout, type PendingNavigation } from "./workspace";
+import { scanLocalSymbolOccurrences } from "./components/CodeEditor";
+import { DEFAULT_LAYOUT, hasUnsavedWork, initialWorkspace, workspaceReducer, type OpenTab, type PanelLayout, type PendingNavigation, type SymbolMap, type SymbolOccurrence } from "./workspace";
 
 export interface VfsEntry { path: string; is_dvpl: boolean; size: number; }
 export interface GameInstall { edition: string; path: string; version: string | null; }
@@ -44,13 +45,15 @@ function App() {
   const [materialSummary, setMaterialSummary] = useState<MaterialSummary | null>(null);
   const [shaderIndex, setShaderIndex] = useState<ShaderIndex>({ files: [], macros: [], cycles: [] });
   const [gameRunning, setGameRunning] = useState(false);
-  const [referencePaths, setReferencePaths] = useState<string[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const requestId = useRef(0);
+  const symbolRequestId = useRef(0);
+  const revealRequestId = useRef(0);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
   const activeTab = useMemo(() => workspace.tabs.find((tab) => tab.path === workspace.activePath) ?? null, [workspace.activePath, workspace.tabs]);
   const activeShader = useMemo(() => shaderIndex.files.find((file) => file.path === activeTab?.path) ?? null, [activeTab?.path, shaderIndex.files]);
+  const navigableSymbols = useMemo(() => new Set(shaderIndex.files.flatMap((file) => [...file.defines, ...file.conditions, ...file.properties, ...file.uniforms, ...file.entry_points])), [shaderIndex.files]);
 
   useEffect(() => { localStorage.setItem(LAYOUT_KEY, JSON.stringify(workspace.layout)); }, [workspace.layout]);
   useEffect(() => { localStorage.setItem(TREE_KEY, JSON.stringify([...expanded])); }, [expanded]);
@@ -100,7 +103,6 @@ function App() {
     }, 250);
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [activeTab]);
-  useEffect(() => setReferencePaths([]), [activeTab?.path]);
 
   useEffect(() => {
     void (async () => {
@@ -144,6 +146,63 @@ function App() {
       }
     } catch (error) { dispatch({ type: "LOAD_ERROR", path, requestId: id, error: String(error) }); }
   }, []);
+
+  const requestSymbolMap = useCallback(async (symbol: string, pinned: boolean) => {
+    const path = workspaceRef.current.activePath;
+    if (!path || !/\.(sl|slh)$/i.test(path)) return;
+    const id = ++symbolRequestId.current;
+    dispatch({ type: "START_SYMBOL_MAP", symbol, requestId: id, pinned });
+    try {
+      const map = await invoke<SymbolMap>("shader_symbol_map", { path, symbol });
+      const tab = workspaceRef.current.tabs.find((item) => item.path === path);
+      if (tab && ["clean", "draft", "staged"].includes(tab.status)) {
+        const local = scanLocalSymbolOccurrences(path, tab.draft, symbol);
+        map.occurrences = [...local, ...map.occurrences.filter((item) => item.path !== path)];
+      }
+      dispatch({ type: "SET_SYMBOL_MAP", map, requestId: id });
+    } catch (error) {
+      dispatch({ type: "SET_SYMBOL_MAP_ERROR", error: String(error), requestId: id });
+    }
+  }, []);
+
+  const previewSymbol = useCallback((symbol: string | null) => {
+    if (workspaceRef.current.symbolNavigation.pinned) return;
+    if (!symbol || !navigableSymbols.has(symbol)) { dispatch({ type: "CLEAR_SYMBOL_MAP" }); return; }
+    if (workspaceRef.current.symbolNavigation.symbol === symbol && workspaceRef.current.symbolNavigation.map) return;
+    void requestSymbolMap(symbol, false);
+  }, [navigableSymbols, requestSymbolMap]);
+
+  const pinSymbol = useCallback((symbol: string) => { void requestSymbolMap(symbol, true); }, [requestSymbolMap]);
+
+  const navigateOccurrence = useCallback(async (occurrence: SymbolOccurrence) => {
+    const occurrences = workspaceRef.current.symbolNavigation.map?.occurrences ?? [];
+    const index = occurrences.findIndex((item) => item.path === occurrence.path && item.line === occurrence.line && item.column === occurrence.column && item.kind === occurrence.kind);
+    if (index >= 0) dispatch({ type: "SET_SYMBOL_INDEX", index });
+    await selectFile(occurrence.path);
+    dispatch({ type: "SET_REVEAL_TARGET", target: { ...occurrence, requestId: ++revealRequestId.current } });
+  }, [selectFile]);
+
+  const navigateByOffset = useCallback((offset: number) => {
+    const navigation = workspaceRef.current.symbolNavigation;
+    const occurrences = navigation.map?.occurrences ?? [];
+    if (!occurrences.length) return;
+    const index = (Math.max(navigation.currentIndex, 0) + offset + occurrences.length) % occurrences.length;
+    void navigateOccurrence(occurrences[index]);
+  }, [navigateOccurrence]);
+
+  const goToDefinition = useCallback(() => {
+    const occurrence = workspaceRef.current.symbolNavigation.map?.occurrences.find((item) => item.kind.endsWith("_declaration") || item.kind === "macro_definition");
+    if (occurrence) void navigateOccurrence(occurrence);
+  }, [navigateOccurrence]);
+
+  useEffect(() => {
+    const navigation = workspaceRef.current.symbolNavigation;
+    if (navigation.pinned && navigation.symbol && activeTab && /\.(sl|slh)$/i.test(activeTab.path)) {
+      const remainsInsideMappedScope = navigation.map?.occurrences.some((item) => item.path === activeTab.path);
+      if (!remainsInsideMappedScope) void requestSymbolMap(navigation.symbol, true);
+    }
+    else if (!navigation.pinned) dispatch({ type: "CLEAR_SYMBOL_MAP" });
+  }, [activeTab?.path, requestSymbolMap]);
 
   const stageTab = useCallback(async (path: string) => {
     const tab = workspaceRef.current.tabs.find((item) => item.path === path);
@@ -192,11 +251,6 @@ function App() {
     const resolved = current?.includes.find((path) => path === normalized || path.endsWith(`/${normalized}`));
     if (resolved) void selectFile(resolved); else setStatus(`Include not found: ${target}`);
   }, [selectFile, shaderIndex.files]);
-
-  const findReferences = useCallback(async (symbol: string) => {
-    try { setReferencePaths(await invoke<string[]>("shader_references", { symbol })); setStatus(`References for ${symbol}`); }
-    catch (error) { setStatus(`Reference search failed: ${error}`); }
-  }, []);
 
   const revertActive = useCallback(async () => {
     const tab = workspaceRef.current.tabs.find((item) => item.path === workspaceRef.current.activePath);
@@ -291,7 +345,7 @@ function App() {
         {activeView === "files" ? <FileTree ref={searchRef} entries={entries} selected={workspace.activePath} onSelect={selectFile} expanded={expanded} onExpandedChange={setExpanded} /> : <div className="settings-placeholder"><h2>{activeView === "graphics" ? "Runtime" : activeView === "playground" ? "Workflow" : activeView === "cache" ? "Cache tools" : "Settings"}</h2><p className="muted">{gameInstall ? gameInstall.path : "Open a game installation first."}</p>{shaderIndex.cycles.length > 0 && <p className="warning-banner">{shaderIndex.cycles.length} shader include cycle(s) detected.</p>}</div>}
       </section>
       <div className="resize-handle tree-resize" onPointerDown={(event) => startResize("treeWidth", event)} />
-      {activeView === "files" && <Editor tabs={workspace.tabs} activePath={workspace.activePath} onActivate={(path) => dispatch({ type: "ACTIVATE_TAB", path })} onClose={closeTab} onEdit={(path, draft) => dispatch({ type: "EDIT_TAB", path, draft })} onStage={(path) => void stageTab(path)} onApplyAll={() => void applyAll()} onDiscardActive={() => void revertActive()} onDiscardAll={() => void discardAll()} hasUnsavedWork={hasUnsavedWork(workspace)} diagnostics={diagnostics} materialSummary={materialSummary} shaderInfo={activeShader} shaderCompletions={[...new Set([...shaderIndex.macros, "uniform", "property", "fragment_in", "fragment_out", "vertex_in", "vertex_out", "sampler2D", "samplerCUBE", "half", "half2", "half3", "half4", "float", "float2", "float3", "float4"])]} onFormat={() => void formatActive()} onOpenInclude={openInclude} referencePaths={referencePaths} onFindReferences={(symbol) => void findReferences(symbol)} />}
+      {activeView === "files" && <Editor tabs={workspace.tabs} activePath={workspace.activePath} onActivate={(path) => dispatch({ type: "ACTIVATE_TAB", path })} onClose={closeTab} onEdit={(path, draft) => dispatch({ type: "EDIT_TAB", path, draft })} onStage={(path) => void stageTab(path)} onApplyAll={() => void applyAll()} onDiscardActive={() => void revertActive()} onDiscardAll={() => void discardAll()} hasUnsavedWork={hasUnsavedWork(workspace)} diagnostics={diagnostics} materialSummary={materialSummary} shaderInfo={activeShader} shaderCompletions={[...new Set([...shaderIndex.macros, "uniform", "property", "fragment_in", "fragment_out", "vertex_in", "vertex_out", "sampler2D", "samplerCUBE", "half", "half2", "half3", "half4", "float", "float2", "float3", "float4"])]} onFormat={() => void formatActive()} onOpenInclude={openInclude} symbolNavigation={workspace.symbolNavigation} onPreviewSymbol={previewSymbol} onPinSymbol={pinSymbol} onTogglePin={() => dispatch({ type: "SET_SYMBOL_PINNED", pinned: !workspace.symbolNavigation.pinned })} onClearSymbol={() => dispatch({ type: "CLEAR_SYMBOL_MAP" })} onPreviousOccurrence={() => navigateByOffset(-1)} onNextOccurrence={() => navigateByOffset(1)} onNavigateOccurrence={(occurrence) => void navigateOccurrence(occurrence)} onGoToDefinition={goToDefinition} onRevealHandled={() => dispatch({ type: "SET_REVEAL_TARGET", target: null })} />}
       {activeView === "graphics" && <div className="tool-host"><GraphicsView running={gameRunning} onStatus={setStatus} /></div>}
       {activeView === "playground" && <div className="tool-host"><PlaygroundView running={gameRunning} hasChanges={hasUnsavedWork(workspace)} onApply={applyAll} onRefreshProcess={refreshProcess} onStatus={setStatus} /></div>}
       {activeView === "cache" && <div className="tool-host"><ShaderCacheView running={gameRunning} onStatus={setStatus} /></div>}

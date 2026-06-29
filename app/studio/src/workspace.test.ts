@@ -51,4 +51,23 @@ describe("workspaceReducer", () => {
     expect(state.layout).toMatchObject({ treeWidth: 410, navCollapsed: true });
     expect(state.pendingNavigation).toEqual({ kind: "exit" });
   });
+
+  it("rejects stale symbol-map responses and preserves pin state", () => {
+    let state = initialWorkspace();
+    state = workspaceReducer(state, { type: "START_SYMBOL_MAP", symbol: "EXPOSURE", requestId: 8, pinned: true });
+    state = workspaceReducer(state, { type: "SET_SYMBOL_MAP", requestId: 7, map: { symbol: "OLD", occurrences: [], missing_includes: [], cycles: [], truncated: false } });
+    expect(state.symbolNavigation.symbol).toBe("EXPOSURE");
+    expect(state.symbolNavigation.loading).toBe(true);
+    expect(state.symbolNavigation.pinned).toBe(true);
+  });
+
+  it("stores occurrence selection and reveal targets", () => {
+    const occurrence = { path: "Shaders/a.slh", line: 4, column: 3, length: 8, kind: "usage" as const, preview: "useSymbol();" };
+    let state = initialWorkspace();
+    state = workspaceReducer(state, { type: "START_SYMBOL_MAP", symbol: "mySymbol", requestId: 2, pinned: false });
+    state = workspaceReducer(state, { type: "SET_SYMBOL_MAP", requestId: 2, map: { symbol: "mySymbol", occurrences: [occurrence], missing_includes: [], cycles: [], truncated: false } });
+    state = workspaceReducer(state, { type: "SET_REVEAL_TARGET", target: { ...occurrence, requestId: 1 } });
+    expect(state.symbolNavigation.currentIndex).toBe(0);
+    expect(state.symbolNavigation.reveal?.path).toBe("Shaders/a.slh");
+  });
 });
