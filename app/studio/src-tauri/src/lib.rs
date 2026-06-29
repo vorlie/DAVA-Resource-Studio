@@ -2,6 +2,7 @@ mod commands;
 
 use resourcefs::DiskVfs;
 use std::{path::PathBuf, sync::Mutex};
+use tauri::Manager;
 
 /// Shared application state - held across all Tauri commands.
 pub struct AppState {
@@ -9,6 +10,7 @@ pub struct AppState {
     pub vfs: Mutex<Option<DiskVfs>>,
     pub game_root: Mutex<Option<PathBuf>>,
     pub runtime_root: Mutex<Option<PathBuf>>,
+    pub presence: commands::presence::PresenceService,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,6 +22,12 @@ pub fn run() {
             vfs: Mutex::new(None),
             game_root: Mutex::new(None),
             runtime_root: Mutex::new(None),
+            presence: commands::presence::PresenceService::new(),
+        })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<AppState>().presence.shutdown();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // dvpl
@@ -59,6 +67,10 @@ pub fn run() {
             commands::runtime::shader_cache_backups,
             commands::runtime::shader_cache_restore,
             commands::runtime::shader_cache_delete_backup,
+            // privacy-conscious Discord Rich Presence
+            commands::presence::presence_set_enabled,
+            commands::presence::presence_set_activity,
+            commands::presence::presence_status,
             // game
             commands::game::game_detect,
             commands::game::game_probe,

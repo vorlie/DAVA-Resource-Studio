@@ -124,6 +124,21 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .cache-filter { display: grid; grid-template-columns: minmax(0,1fr) 120px; gap: 8px; }.cache-filter select { height: 32px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: #0b1119; }
 .cache-table { border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }.cache-header, .cache-entry { display: grid; grid-template-columns: minmax(190px, 1fr) 90px minmax(220px, 1.4fr) 70px; gap: 10px; align-items: center; padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 11px; }.cache-header { color: var(--muted); background: var(--raised); font-weight: 700; }.cache-entry > div { min-width: 0; display: flex; flex-direction: column; }.cache-entry code, .cache-entry small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.cache-entry small { color: var(--muted); }
 
+.settings-section + .settings-section { margin-top: 14px; }
+.settings-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.settings-heading h3 { margin-bottom: 5px; }
+.presence-pill { flex: none; padding: 4px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 10px; }
+.presence-pill.connected { color: #6edb9a; border-color: rgba(110,219,154,.4); background: rgba(110,219,154,.08); }
+.presence-pill.connecting { color: #f4c15d; border-color: rgba(244,193,93,.4); background: rgba(244,193,93,.08); }
+.presence-pill.disconnected { color: #ff9f6e; border-color: rgba(255,159,110,.4); background: rgba(255,159,110,.08); }
+.toggle-setting { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); cursor: pointer; }
+.toggle-setting > span { min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.toggle-setting small, .privacy-note, .presence-message { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.toggle-setting input { width: 18px; height: 18px; flex: none; accent-color: var(--accent); cursor: pointer; }
+.toggle-setting input:disabled { cursor: not-allowed; }
+.presence-message { margin-top: 10px !important; color: #f4c15d !important; }
+.privacy-note { margin-top: 10px !important; }
+
 @media (max-width: 850px) {
   .status-sub { display: none; }
   .editor-actions .ghost:first-child { display: none; }

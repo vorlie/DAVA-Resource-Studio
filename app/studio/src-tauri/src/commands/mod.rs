@@ -1,5 +1,6 @@
 pub mod dvpl;
 pub mod game;
-pub mod vfs;
+pub mod presence;
 pub mod resource;
 pub mod runtime;
+pub mod vfs;

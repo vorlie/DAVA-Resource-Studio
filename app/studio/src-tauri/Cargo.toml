@@ -29,6 +29,7 @@ resourcefs = { path = "../../../crates/resourcefs" }
 game      = { path = "../../../crates/game" }
 serde_yaml = "0.9"
 sha2 = "0.10"
+discord-rich-presence = "1.1"
 
 [dev-dependencies]
 tempfile = "3"

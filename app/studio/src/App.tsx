@@ -10,9 +10,11 @@ import StatusBar from "./components/StatusBar";
 import GraphicsView from "./components/GraphicsView";
 import ShaderCacheView from "./components/ShaderCacheView";
 import PlaygroundView from "./components/PlaygroundView";
+import SettingsView from "./components/SettingsView";
 import type { MaterialSummary, ShaderFileInfo } from "./components/Editor";
 import { scanLocalSymbolOccurrences } from "./components/CodeEditor";
 import { DEFAULT_LAYOUT, hasUnsavedWork, initialWorkspace, workspaceReducer, type OpenTab, type PanelLayout, type PendingNavigation, type SymbolMap, type SymbolOccurrence } from "./workspace";
+import { activityForView, DISABLED_PRESENCE_STATUS, readPresencePreference, writePresencePreference, type PresenceStatus } from "./presence";
 
 export interface VfsEntry { path: string; is_dvpl: boolean; size: number; }
 export interface GameInstall { edition: string; path: string; version: string | null; }
@@ -45,6 +47,9 @@ function App() {
   const [materialSummary, setMaterialSummary] = useState<MaterialSummary | null>(null);
   const [shaderIndex, setShaderIndex] = useState<ShaderIndex>({ files: [], macros: [], cycles: [] });
   const [gameRunning, setGameRunning] = useState(false);
+  const [presenceEnabled, setPresenceEnabled] = useState(readPresencePreference);
+  const [presenceStatus, setPresenceStatus] = useState<PresenceStatus>(DISABLED_PRESENCE_STATUS);
+  const [presenceBusy, setPresenceBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const requestId = useRef(0);
   const symbolRequestId = useRef(0);
@@ -54,9 +59,51 @@ function App() {
   const activeTab = useMemo(() => workspace.tabs.find((tab) => tab.path === workspace.activePath) ?? null, [workspace.activePath, workspace.tabs]);
   const activeShader = useMemo(() => shaderIndex.files.find((file) => file.path === activeTab?.path) ?? null, [activeTab?.path, shaderIndex.files]);
   const navigableSymbols = useMemo(() => new Set(shaderIndex.files.flatMap((file) => [...file.defines, ...file.conditions, ...file.properties, ...file.uniforms, ...file.entry_points])), [shaderIndex.files]);
+  const presenceActivity = useMemo(() => activityForView(activeView, activeTab?.path ?? null, activeTab?.status), [activeTab?.path, activeTab?.status, activeView]);
 
   useEffect(() => { localStorage.setItem(LAYOUT_KEY, JSON.stringify(workspace.layout)); }, [workspace.layout]);
   useEffect(() => { localStorage.setItem(TREE_KEY, JSON.stringify([...expanded])); }, [expanded]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<PresenceStatus>("presence_set_enabled", { enabled: presenceEnabled })
+      .then((next) => { if (!cancelled) setPresenceStatus(next); })
+      .catch(() => {
+        if (!cancelled) setPresenceStatus({ enabled: presenceEnabled, state: presenceEnabled ? "disconnected" : "disabled", message: presenceEnabled ? "Discord presence is unavailable." : null });
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!presenceEnabled) return;
+    void invoke("presence_set_activity", { activity: presenceActivity }).catch(() => {
+      setPresenceStatus({ enabled: true, state: "disconnected", message: "Discord presence is unavailable." });
+    });
+  }, [presenceActivity, presenceEnabled]);
+
+  useEffect(() => {
+    if (!presenceEnabled) { setPresenceStatus(DISABLED_PRESENCE_STATUS); return; }
+    const refresh = () => void invoke<PresenceStatus>("presence_status")
+      .then(setPresenceStatus)
+      .catch(() => setPresenceStatus({ enabled: true, state: "disconnected", message: "Discord presence is unavailable." }));
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(timer);
+  }, [presenceEnabled]);
+
+  const changePresence = useCallback(async (enabled: boolean) => {
+    setPresenceBusy(true);
+    try {
+      const next = await invoke<PresenceStatus>("presence_set_enabled", { enabled });
+      setPresenceEnabled(enabled);
+      writePresencePreference(enabled);
+      setPresenceStatus(next);
+    } catch {
+      setPresenceStatus({ enabled: presenceEnabled, state: presenceEnabled ? "disconnected" : "disabled", message: "Could not change Discord presence." });
+    } finally {
+      setPresenceBusy(false);
+    }
+  }, [presenceEnabled]);
 
   const refreshStaged = useCallback(async () => {
     const paths = await invoke<string[]>("vfs_dirty_paths");
@@ -349,7 +396,7 @@ function App() {
       {activeView === "graphics" && <div className="tool-host"><GraphicsView running={gameRunning} onStatus={setStatus} /></div>}
       {activeView === "playground" && <div className="tool-host"><PlaygroundView running={gameRunning} hasChanges={hasUnsavedWork(workspace)} onApply={applyAll} onRefreshProcess={refreshProcess} onStatus={setStatus} /></div>}
       {activeView === "cache" && <div className="tool-host"><ShaderCacheView running={gameRunning} onStatus={setStatus} /></div>}
-      {activeView === "settings" && <div className="tool-host"><div className="tool-view"><header><div><h2>Studio Settings</h2><p>Runtime path and installation details.</p></div></header><p><strong>Game:</strong> {gameInstall?.path ?? "Not selected"}</p><p><strong>Runtime:</strong> configure from Graphics → Runtime path.</p></div></div>}
+      {activeView === "settings" && <SettingsView gamePath={gameInstall?.path ?? null} presenceEnabled={presenceEnabled} presenceStatus={presenceStatus} presenceBusy={presenceBusy} onPresenceChange={(enabled) => void changePresence(enabled)} />}
       <StatusBar gameInstall={gameInstall} isDirty={workspace.stagedPaths.length > 0 || workspace.tabs.some((tab) => tab.status === "draft")} status={status} />
 
       {pending && <div className="modal-backdrop" role="presentation"><section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><h2 id="confirm-title">Unsaved changes</h2><p>{dialogText}</p><div className="dialog-actions"><button className="ghost" onClick={() => void finishPending("cancel")}>Cancel</button><button className="danger-btn" onClick={() => void finishPending("discard")}>Discard</button><button className="primary" onClick={() => void finishPending("save")}>{pending.kind === "close-tab" ? "Stage & close" : "Apply all"}</button></div></section></div>}
